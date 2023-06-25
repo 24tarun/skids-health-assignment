@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  InputBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: skidsinputbucket
+
+  OutputBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: skidsoutputbucket
+  
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: FrameExtractionLambda
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          def handler(event, context):
+              s3 = boto3.client('s3')
+              batch = boto3.client('batch')
+              input_bucket = event['Records'][0]['s3']['bucket']['name']
+              input_key = event['Records'][0]['s3']['object']['key']
+              output_bucket = 'skidsoutputbucket'
+              output_key = input_key.split('.')[0] + '_frames.txt'
+
+              response = batch.submit_job(
+                  jobName='FrameExtractionJob',
+                  jobQueue='my-batch-job-queue',
+                  jobDefinition='my-batch-job-definition',
+                  containerOverrides={
+                      'environment': [
+                          {'name': 'INPUT_BUCKET', 'value': input_bucket},
+                          {'name': 'INPUT_KEY', 'value': input_key},
+                          {'name': 'OUTPUT_BUCKET', 'value': output_bucket},
+                          {'name': 'OUTPUT_KEY', 'value': output_key}
+                      ]
+                  }
+              )
+
+          return {
+              'statusCode': 200,
+              'body': json.dumps('Video processing job submitted successfully.')
+          }
+
+      Timeout: 60
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: FrameExtractionLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AWSBatchFullAccess'
+
+  EventRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - 'aws.s3'
+        detail-type:
+          - 'AWS API Call via CloudTrail'
+        detail:
+          eventSource:
+            - 's3.amazonaws.com'
+          eventName:
+            - 'PutObject'
+          requestParameters:
+            bucketName:
+              - !Ref InputBucket
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: FrameExtractionLambdaTarget
+
+  PermissionForEventsToInvokeLambda:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn
+
+  BatchJobQueue:
+    Type: 'AWS::Batch::JobQueue'
+    Properties:
+      JobQueueName: my-batch-job-queue
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: my-compute-env
+
+  BatchJobDefinition:
+    Type: 'AWS::Batch::JobDefinition'
+    Properties:
+      JobDefinitionName: my-batch-job-definition
+      Type: container
+      ContainerProperties:
+        Image: my-container-image
+        Vcpus: 1
+        Memory: 2048
+        Command:
+          - 'python'
+          - 'frame_extraction.py'
+        Environment:
+          - Name: OUTPUT_BUCKET
+            Value: !Ref OutputBucket
